@@ -1,0 +1,72 @@
+---
+title: "R Notebook"
+output:
+  word_document: default
+  html_notebook: default
+---
+#BIS581
+#Visualization homework
+Load some data
+```{r}
+titanic <- read.csv("C:/Users/vamsh/Downloads/Titanic.csv", header = TRUE, stringsAsFactors = FALSE)
+```
+
+Perform any work you need transform,fix,wrangle your data
+```{r}
+
+# Extract gender and marital status from Name field
+titanic$Gender <- ifelse(grepl("Mr ", titanic$Name) | grepl("Master", titanic$Name), "Male",
+                  ifelse(grepl("Miss", titanic$Name) | grepl("Mrs", titanic$Name), "Female", NA))
+
+titanic$MaritalStatus <- ifelse(grepl("Mrs", titanic$Name), "Married",
+                         ifelse(grepl("Miss", titanic$Name), "Unmarried", NA))
+
+# Clean PClass values
+titanic$PClass <- trimws(titanic$PClass)  
+titanic <- subset(titanic, PClass %in% c("1st", "2nd", "3rd"))
+```
+
+```{r}
+library(ggplot2)
+```
+
+Using ggplot2, create appropriate plots to answer the following questions:
+
+Is there a relationship between survival and gender?
+```{r}
+titanic_gender <- subset(titanic, !is.na(Gender))
+
+ggplot(titanic_gender, aes(x = Gender, fill = factor(Survived))) +
+  geom_bar(position = "fill") +
+  labs(title = "Survival Rate by Gender",
+       x = "Gender", y = "Proportion",
+       fill = "Survived") +
+  scale_fill_manual(values = c("0" = "red", "1" = "green"))
+```
+This chart shows that women had a much higher chance of surviving than men. Most women survived, while most men did not. The green color represents survival which for females is bigger, meaning that many more of them lived. The red color represents passengers who did not survive, which for males is much larger, showing that most of the men lost their lives.
+Is there a relationship between survival and class?
+```{r}
+ggplot(titanic, aes(x = PClass, fill = factor(Survived))) +
+  geom_bar(position = "fill") +
+  labs(title = "Survival Rate by Passenger Class",
+       x = "Class", y = "Proportion",
+       fill = "Survived") +
+  scale_fill_manual(values = c("0" = "red", "1" = "green"))
+```
+In 1st class, more than half of the people survived. In 2nd class, less than half survived. In 3rd class, most people did not survive. From this we can say that there is direct relationship between passenger class and survival rate. 
+
+
+Is there a relationship between survival and marital status for females? What about males? If there isn't enough data to answer a question, state so and explain.
+```{r}
+female_data <- subset(titanic, Gender == "Female" & !is.na(MaritalStatus))
+
+ggplot(female_data, aes(x = MaritalStatus, fill = factor(Survived))) +
+  geom_bar(position = "fill") +
+  labs(title = "Survival Rate by Marital Status (Females)",
+       x = "Marital Status", y = "Proportion",
+       fill = "Survived") +
+  scale_fill_manual(values = c("0" = "red", "1" = "green"))
+
+```
+Married females had higher chance of survival than unmarried females. For male passengers, the titles in the dataset are mostly “Mr” and “Master.” These titles tell us gender and sometimes age, but they do not give us information about whether the person was married or unmarried. Because of this, we cannot determine the marital status for men from the available data, so it isn’t possible to make a reliable survival comparison based on marital status for males.
+

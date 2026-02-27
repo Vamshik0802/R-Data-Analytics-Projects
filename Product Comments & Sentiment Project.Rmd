@@ -1,0 +1,368 @@
+---
+title: "Product Comments & Sentiment"
+author: "Vamshi Krishna E"
+date: "`r format(Sys.Date(), '%B %d, %Y')`"
+output:
+  word_document: default
+  html_document:
+    toc: true
+    toc_depth: 2
+always_allow_html: true
+---
+
+
+
+# load libraries that you feel you need and explain why
+- **tidyverse**: data wrangling & basic plotting.  
+- **janitor**: quick cleanup of column names (snake_case).  
+- **tidytext**: turn comments into words for frequency & sentiment.  
+- **textdata**: provides Afinn/Bing/NRC lexicons.  
+- **RColorBrewer**: for brewer.pal used in wordcloud
+- **wordcloud + RColorBrewer**: colorful word cloud.  
+- **igraph + ggraph**: bigram (two-word) network diagram.  
+- **knitr **: neat tables in the knitted report.  
+- **scales + forcats**: nicer labels & factor ordering.
+
+```{r setup, echo=TRUE, message=FALSE, warning=FALSE}
+if (!("knitr" %in% installed.packages())) install.packages("knitr")
+
+library(tidyverse)
+library(janitor)
+library(lubridate)
+library(tidytext)
+library(textdata)
+library(RColorBrewer)
+library(wordcloud)
+library(igraph)
+library(ggraph)
+library(knitr)
+library(scales)
+library(forcats)
+
+```
+
+# 1) Load the .RDS 
+
+```{r load}
+# The .Rmd and the .RDS should be in the same folder.
+data_path <- "productsalescomments.RDS"
+dat_raw <- readRDS(data_path)
+
+dat <- dat_raw %>% clean_names()
+
+glimpse(dat)
+```
+
+## Q2. Is any data prep needed? (Yes — minimal & safe)
+Yes,
+- Trim extra spaces in text fields so repeated phrases match exactly.  
+- Create a `transaction_id` if one is missing, so each comment can be scored.  
+- Detect likely columns for **customer id / parlor / production / comment / rating** in case names vary slightly
+
+```{r harmonize}
+norm_name <- function(x) tolower(gsub("[^a-z0-9]+","", x))
+names_norm <- setNames(names(dat), sapply(names(dat), norm_name))
+
+pick_col <- function(patterns) {
+  for (p in patterns) {
+    hit <- names(dat)[grepl(p, names(dat), ignore.case = TRUE)]
+    if (length(hit) > 0) return(hit[1])
+  }
+  return(NA_character_)
+}
+
+col_customer   <- pick_col(c("^customer.*id$", "^cust.*id$", "^cid$", "customerid"))
+col_parlor     <- pick_col(c("^parlor.*loc", "^parlor$", "site.*parlor", "store", "location_parlor"))
+col_production <- pick_col(c("^production.*loc", "^plant$", "^factory$", "prod.*site"))
+col_comment    <- pick_col(c("^comment$", "^comments$", "^review$", "feedback", "text"))
+col_rating     <- pick_col(c("^star.*rating$", "^rating$", "stars"))
+
+knitr::kable(tibble(
+  role = c("CustomerID","ParlorLocation","ProductionLocation","Comment","Rating"),
+  column_detected = c(col_customer, col_parlor, col_production, col_comment, col_rating)
+))
+
+```
+
+# 3) Minimal cleaning used throughout
+
+- Trim spaces in text columns.  
+- Keep only non-empty comments for text analysis.  
+- Create a transaction id if none exists (for safe grouping).
+
+```{r minimal-clean}
+# Make a generic transaction id if not present
+if (!any(grepl("^trans", names(dat), ignore.case = TRUE))) {
+  dat <- dat %>% mutate(transaction_id = row_number())
+} else {
+  tr_col <- names(dat)[grepl("^trans", names(dat), ignore.case = TRUE)][1]
+  dat <- dat %>% rename(transaction_id = all_of(tr_col))
+}
+
+# Basic trims
+if (!is.na(col_comment)) {
+  dat <- dat %>% mutate(!!col_comment := str_squish(.data[[col_comment]]))
+}
+
+comments_df <- if (!is.na(col_comment)) {
+  dat %>%
+    filter(!is.na(.data[[col_comment]]), .data[[col_comment]] != "") %>%
+    transmute(
+      transaction_id,
+      customer_id = if (!is.na(col_customer)) .data[[col_customer]] else NA,
+      parlor = if (!is.na(col_parlor)) .data[[col_parlor]] else NA,
+      production = if (!is.na(col_production)) .data[[col_production]] else NA,
+      comment = .data[[col_comment]]
+    )
+} else {
+  tibble(transaction_id = integer(), customer_id = character(),
+         parlor = character(), production = character(), comment = character())
+}
+
+knitr::kable(head(comments_df, 5))
+```
+
+# Q3. Decide if you want to filter
+
+Below is a simple **filter switch**. Set `apply_filter <- TRUE` and define a rule if you want to narrow scope (e.g., focus on one parlor). By default, **no filter** is applied to keep the analysis complete.
+
+```{r filter}
+apply_filter <- FALSE  # change to TRUE if you want to filter
+parlor_to_keep <- NA   # e.g., "Downtown"
+
+if (apply_filter && !is.na(parlor_to_keep) && "parlor" %in% names(comments_df)) {
+  comments_df <- comments_df %>% filter(parlor == parlor_to_keep)
+  cat("Filter applied: only parlor =", parlor_to_keep, "\n")
+} else {
+  cat("No filter applied (full dataset used).\n")
+}
+```
+
+# 4) Top 15 meaningful words
+
+Turn comments into single words (tokens), drop common stopwords, and show the most frequent 15 words.
+
+```{r top15}
+if (nrow(comments_df) > 0) {
+  tidy_tokens <- comments_df %>%
+    unnest_tokens(word, comment) %>%
+    anti_join(stop_words, by = "word") %>%
+    filter(!str_detect(word, "^[0-9]+$"))
+
+  top15 <- tidy_tokens %>%
+    count(word, sort = TRUE) %>%
+    slice_head(n = 15)
+
+knitr::kable(top15, col.names = c("Word", "Count"))
+
+} else {
+  cat("No comments available to analyze.\n")
+}
+```
+
+# 5) Word cloud
+
+```{r wordcloud, fig.width=7, fig.height=5}
+if (exists("tidy_tokens") && nrow(tidy_tokens) > 0) {
+  wc <- tidy_tokens %>% count(word, sort = TRUE)
+  suppressWarnings(wordcloud(
+    words = wc$word,
+    freq = wc$n,
+    max.words = 160,
+    random.order = FALSE,
+    scale = c(4, 0.8),
+    colors = brewer.pal(8, "Dark2")
+  ))
+} else {
+  cat("No tokens available for word cloud.\n")
+}
+
+```
+
+# 6) Top 5 customers by number of comments (+ Afinn sentiment)
+
+Identified the five customers who **post the most comments overall**, and also compute their **average Afinn sentiment** (positive numbers = more positive words, negative = more negative).
+
+```{r top-customers-afinn}
+if (!is.na(col_customer) && nrow(comments_df) > 0) {
+  # Afinn is integer-scored per word: negative to positive
+  afinn <- get_sentiments("afinn")
+
+  sent_scored <- comments_df %>%
+    mutate(comment_id = row_number()) %>%
+    unnest_tokens(word, comment) %>%
+    inner_join(afinn, by = "word") %>%
+    group_by(comment_id) %>%
+    summarise(comment_score = sum(value), .groups = "drop") %>%
+    right_join(comments_df %>% mutate(comment_id = row_number()),
+               by = "comment_id") %>%
+    mutate(comment_score = replace_na(comment_score, 0))
+
+  top5_customers <- sent_scored %>%
+    filter(!is.na(customer_id)) %>%
+    group_by(customer_id) %>%
+    summarise(
+      comments = n(),
+      avg_afinn = mean(comment_score),
+      total_afinn = sum(comment_score)
+    ) %>%
+    arrange(desc(comments), desc(total_afinn)) %>%
+    slice_head(n = 5)
+
+knitr::kable(
+  top5_customers %>% mutate(across(c(avg_afinn, total_afinn), round, 2))
+)
+
+
+} else {
+  cat("CustomerID column not found or no comments.\n")
+}
+```
+
+# 7) Parlor site with the most comments – negative or positive?
+
+ count comments by parlor, then label each comment by **Bing** lexicon (positive/negative) and compute net scores.
+
+```{r parlor-sentiment}
+if (!is.na(col_parlor) && nrow(comments_df) > 0) {
+
+  bing <- get_sentiments("bing")
+  comment_scores <- comments_df %>%
+    mutate(comment_id = row_number()) %>%
+    unnest_tokens(word, comment) %>%
+    anti_join(stop_words, by = "word") %>%
+    inner_join(bing, by = "word") %>%
+    mutate(score = ifelse(sentiment == "positive", 1, -1)) %>%
+    group_by(comment_id) %>%
+    summarise(sent_score = sum(score), .groups = "drop") %>%
+    right_join(comments_df %>% mutate(comment_id = row_number()), by = "comment_id") %>%
+    mutate(sent_score = replace_na(sent_score, 0))
+
+  by_parlor <- comment_scores %>%
+    group_by(parlor) %>%
+    summarise(
+      comments = n(),
+      net_sentiment = sum(sent_score),
+      avg_sentiment = mean(sent_score)
+    ) %>%
+    arrange(desc(comments))
+
+knitr::kable(by_parlor, digits = 2)
+
+  most_comments_parlor <- by_parlor %>% slice_max(order_by = comments, n = 1, with_ties = FALSE)
+knitr::kable(most_comments_parlor, digits = 2, caption = "Parlor with the most comments")
+
+
+} else {
+  cat("Parlor site column not found or no comments.\n")
+}
+```
+
+# 8) Production site with the most comments – negative or positive?
+
+Same idea as the parlor analysis, grouped by **production** site.
+
+```{r production-sentiment}
+if (!is.na(col_production) && nrow(comments_df) > 0) {
+
+  bing <- get_sentiments("bing")
+  comment_scores_prod <- comments_df %>%
+    mutate(comment_id = row_number()) %>%
+    unnest_tokens(word, comment) %>%
+    anti_join(stop_words, by = "word") %>%
+    inner_join(bing, by = "word") %>%
+    mutate(score = ifelse(sentiment == "positive", 1, -1)) %>%
+    group_by(comment_id) %>%
+    summarise(sent_score = sum(score), .groups = "drop") %>%
+    right_join(comments_df %>% mutate(comment_id = row_number()), by = "comment_id") %>%
+    mutate(sent_score = replace_na(sent_score, 0))
+
+  by_prod <- comment_scores_prod %>%
+    group_by(production) %>%
+    summarise(
+      comments = n(),
+      net_sentiment = sum(sent_score),
+      avg_sentiment = mean(sent_score)
+    ) %>%
+    arrange(desc(comments))
+
+knitr::kable(by_prod, digits = 2)
+
+  most_comments_prod <- by_prod %>% slice_max(order_by = comments, n = 1, with_ties = FALSE)
+knitr::kable(most_comments_prod, digits = 2, caption = "Production site with the most comments")
+
+
+} else {
+  cat("Production site column not found or no comments.\n")
+}
+```
+
+# 9) Top 10 most frequent full comments
+
+Here  count identical comment strings (after trimming), so you can see phrases that repeat.
+
+```{r top10-comments}
+if (nrow(comments_df) > 0) {
+  top_comments <- comments_df %>%
+    count(comment, sort = TRUE) %>%
+    slice_head(n = 10)
+
+  knitr::kable(
+  top_comments %>% rename(occurrences = n)
+)
+
+} else {
+  cat("No comments to count.\n")
+}
+```
+
+# 10) Bigram network (comment word pairs)
+
+ Build a network of two-word sequences (bigrams) to show commonly paired terms. Remove stopwords and plot top connections.
+
+```{r bigram-network, fig.width=7, fig.height=6}
+if (nrow(comments_df) > 0) {
+  bigrams <- comments_df %>%
+    unnest_tokens(bigram, comment, token = "ngrams", n = 2) %>%
+    separate(bigram, c("w1","w2"), sep = " ") %>%
+    filter(!w1 %in% stop_words$word, !w2 %in% stop_words$word) %>%
+    count(w1, w2, sort = TRUE)
+
+  top_edges <- bigrams %>% slice_max(n, n = 120)
+
+  if (nrow(top_edges) > 0) {
+    g <- graph_from_data_frame(top_edges)
+    ggraph(g, layout = "fr") +
+      geom_edge_link(aes(width = n, color = n), alpha = 0.5) +
+      geom_node_point(color = "steelblue", size = 3) +
+      geom_node_text(aes(label = name), repel = TRUE, size = 3, color = "black") +
+      scale_color_gradient(low = "lightblue", high = "darkblue") +
+      labs(title = "Bigram Network (Top 120 Links)", x = NULL, y = NULL) +
+      theme_void()
+  } else cat("Not enough bigrams to draw a network.\n")
+} else cat("No comments to build bigrams.\n")
+
+```
+
+
+
+
+# 11) GRADS — Short recommendations based on feedback
+
+
+```{r grads-notes, echo=FALSE}
+cat("- If a specific parlor shows more negative average sentiment, review staffing and service speed during busy hours.\n")
+cat("- Repeating issues in top comments (e.g., 'melting', 'long wait') should map to operational fixes (cup/lid policy, queue management).\n")
+cat("- Consider re-running high-performing weekly feature flavors (by sales + positive sentiment) in off-peak periods.\n")
+cat("- Share positive recurring comments with marketing for social proof.\n")
+```
+
+# 12) Appendix (optional quick checks)
+
+```{r appendix, eval=FALSE}
+# If you want to peek at which columns exist:
+names(dat)
+
+# Sample a few comments
+comments_df %>% slice_sample(n = 10)
+```
