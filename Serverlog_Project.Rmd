@@ -1,0 +1,468 @@
+---
+title: "Analysis of VDI Infrastructure Utilization Patterns"
+author: "Vamshi Krishna E"
+date: "`r Sys.Date()`"
+output: 
+  word_document:
+    toc: true
+  html_document:
+    toc: true
+    toc_float: true
+    theme: cosmo
+---
+
+```{r configuration, include=FALSE}
+# Set global options for all code chunks
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE, fig.align = 'center')
+```
+
+# Executive Overview
+
+This document presents findings from an investigation into Virtual Desktop Infrastructure usage during 2015. The analysis addresses five critical business questions related to user adoption, system capacity, and software portfolio management.
+
+# Load Analysis Tools
+
+```{r packages, message=FALSE, warning=FALSE}
+# Import required R packages
+require(tidyverse)
+require(lubridate)
+require(knitr)
+require(scales)
+```
+
+# Data Import Process
+
+```{r data_import}
+# Import VDI session records
+session_records <- read.csv("/Users/vamsh/Downloads/bis581_final_logs-2/vdi_serverlogs.csv", 
+                            header = TRUE, stringsAsFactors = FALSE)
+
+# Import application launch records  
+app_records <- read.csv("/Users/vamsh/Downloads/bis581_final_logs-2/vdi_statsapps.csv", 
+                        header = TRUE, stringsAsFactors = FALSE)
+
+# Confirm data import
+sprintf("Session records imported: %s rows", format(nrow(session_records), big.mark=","))
+sprintf("Application records imported: %s rows", format(nrow(app_records), big.mark=","))
+```
+
+# Data Transformation
+
+```{r transform_dates}
+# Process timestamp fields into usable date formats
+session_records <- session_records %>%
+  mutate(
+    login_time = mdy_hm(logon_DTS),
+    logout_time = mdy_hm(logout_DTS),
+    session_date = as.Date(login_time),
+    calendar_year = year(login_time)
+  )
+```
+
+```{r apply_filters}
+# Filter dataset based on project requirements:
+# - Include only 2015 calendar year
+# - Include only virtual desktop machines (CMUVDI naming pattern)
+# - Exclude physical computing labs and libraries
+
+target_year <- 2015
+vdi_pattern <- "^CMUVDI"
+
+filtered_sessions <- session_records %>%
+  filter(
+    calendar_year == target_year,
+    str_detect(comp_name, vdi_pattern)
+  )
+
+# Report filtering results
+cat("Original dataset size:", nrow(session_records), "sessions\n")
+cat("Filtered dataset size:", nrow(filtered_sessions), "sessions\n")
+cat("Data reduction:", round(100 * (1 - nrow(filtered_sessions)/nrow(session_records)), 1), "%\n")
+cat("\nTemporal coverage:", 
+    as.character(min(filtered_sessions$session_date)), 
+    "to", 
+    as.character(max(filtered_sessions$session_date)), "\n")
+```
+
+---
+
+# Investigation 1: User Population Size
+
+**Research Question:** What is the total count of unique individuals who accessed the VDI platform during 2015?
+
+```{r analysis_1}
+# Remove invalid user records before counting
+valid_users <- filtered_sessions %>%
+  filter(
+    !is.na(userid),
+    userid != "",
+    userid != "unknown"
+  )
+
+# Calculate distinct user count
+n_unique_users <- valid_users %>%
+  summarise(count = n_distinct(userid)) %>%
+  pull(count)
+
+# Display result
+cat(sprintf("\n=== FINDING ===\nTotal unique users in 2015: %s\n", 
+            format(n_unique_users, big.mark=",")))
+```
+
+
+---
+
+# Investigation 2: Typical Daily Load
+
+**Research Question:** What is the mean number of users accessing the system on a typical day?
+
+```{r analysis_2}
+# Aggregate to daily level
+daily_stats <- valid_users %>%
+  group_by(session_date) %>%
+  summarise(
+    n_users = n_distinct(userid),
+    n_sessions = n()
+  ) %>%
+  ungroup()
+
+# Calculate daily mean
+avg_daily_count <- mean(daily_stats$n_users)
+daily_percentage <- (avg_daily_count / n_unique_users) * 100
+
+cat(sprintf("\n=== FINDING ===\n"))
+cat(sprintf("Average daily users: %.1f\n", avg_daily_count))
+cat(sprintf("Represents %.1f%% of total user base\n", daily_percentage))
+```
+
+```{r plot_2, fig.width=10, fig.height=5}
+# Visualize daily usage pattern
+ggplot(daily_stats, aes(x = session_date, y = n_users)) +
+  geom_line(color = "#1f77b4", linewidth = 1) +
+  geom_hline(yintercept = avg_daily_count, 
+             linetype = "dashed", 
+             color = "#d62728", 
+             linewidth = 0.8) +
+  annotate("text", 
+           x = mean(daily_stats$session_date), 
+           y = avg_daily_count + 12, 
+           label = sprintf("Mean: %.0f users", avg_daily_count),
+           color = "#d62728",
+           size = 3.5,
+           fontface = "bold") +
+  labs(
+    title = "Daily VDI User Count - 2015",
+    subtitle = "Tracking unique daily users across observation period",
+    x = NULL,
+    y = "Distinct Users"
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(
+    plot.title = element_text(size = 13, face = "bold"),
+    axis.text.x = element_text(angle = 30, hjust = 1)
+  )
+```
+
+
+---
+
+# Investigation 3: Peak Demand Analysis
+
+**Research Question:** What date experienced maximum user concurrency, and how many users were active?
+
+```{r analysis_3}
+# Identify maximum usage day
+max_usage_day <- daily_stats %>%
+  filter(n_users == max(n_users)) %>%
+  slice(1)
+
+# Calculate peak vs average differential
+peak_excess <- ((max_usage_day$n_users - avg_daily_count) / avg_daily_count) * 100
+
+cat(sprintf("\n=== FINDING ===\n"))
+cat(sprintf("Peak usage date: %s\n", format(max_usage_day$session_date, "%B %d, %Y")))
+cat(sprintf("Users on peak day: %s\n", max_usage_day$n_users))
+cat(sprintf("Exceeds average by: %.0f%%\n", peak_excess))
+```
+
+```{r plot_3, fig.width=10, fig.height=5}
+# Create visualization highlighting peak
+daily_stats <- daily_stats %>%
+  mutate(is_peak = session_date == max_usage_day$session_date)
+
+ggplot(daily_stats, aes(x = session_date, y = n_users, fill = is_peak)) +
+  geom_col(width = 1) +
+  scale_fill_manual(values = c("FALSE" = "#1f77b4", "TRUE" = "#ff7f0e")) +
+  labs(
+    title = "VDI Usage with Peak Day Identified",
+    subtitle = sprintf("%s users on %s", 
+                      max_usage_day$n_users,
+                      format(max_usage_day$session_date, "%B %d, %Y")),
+    x = NULL,
+    y = "Unique Users"
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(
+    legend.position = "none",
+    plot.title = element_text(size = 13, face = "bold"),
+    axis.text.x = element_text(angle = 30, hjust = 1)
+  )
+```
+
+
+---
+
+# Investigation 4: User Retention Analysis
+
+**Research Question:** How many users accessed the system exactly once and did not return?
+
+```{r analysis_4}
+# Count sessions per user
+user_freq <- valid_users %>%
+  count(userid, name = "login_frequency")
+
+# Isolate single-session users
+single_use_users <- user_freq %>%
+  filter(login_frequency == 1)
+
+# Calculate percentage
+single_use_rate <- (nrow(single_use_users) / n_unique_users) * 100
+
+cat(sprintf("\n=== FINDING ===\n"))
+cat(sprintf("Single-session users: %s\n", format(nrow(single_use_users), big.mark=",")))
+cat(sprintf("Percentage of user base: %.1f%%\n", single_use_rate))
+```
+
+```{r plot_4, fig.width=10, fig.height=6}
+# Create frequency distribution
+freq_summary <- user_freq %>%
+  mutate(
+    category = case_when(
+      login_frequency == 1 ~ "Single session",
+      login_frequency == 2 ~ "Two sessions",
+      login_frequency <= 5 ~ "3-5 sessions",
+      login_frequency <= 10 ~ "6-10 sessions",
+      login_frequency <= 20 ~ "11-20 sessions",
+      TRUE ~ "20+ sessions"
+    )
+  ) %>%
+  count(category, name = "user_count") %>%
+  mutate(
+    category = factor(category, levels = c(
+      "Single session", "Two sessions", "3-5 sessions",
+      "6-10 sessions", "11-20 sessions", "20+ sessions"
+    ))
+  )
+
+# Visualize distribution
+ggplot(freq_summary, aes(x = category, y = user_count, fill = category)) +
+  geom_col(show.legend = FALSE, width = 0.7) +
+  geom_text(aes(label = user_count), vjust = -0.3, size = 3.5, fontface = "bold") +
+  scale_fill_brewer(palette = "Set3") +
+  labs(
+    title = "User Engagement Level Distribution",
+    subtitle = "Frequency of VDI access across user population",
+    x = "Session Frequency",
+    y = "User Count"
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(plot.title = element_text(size = 13, face = "bold"))
+
+# Display frequency table
+freq_summary %>%
+  kable(
+    col.names = c("Session Frequency", "Number of Users"),
+    caption = "Distribution of User Engagement Levels",
+    format.args = list(big.mark = ",")
+  )
+```
+
+
+
+---
+
+# Investigation 5: Application Portfolio Efficiency
+
+**Research Question:** Which applications demonstrate minimal utilization, suggesting candidates for elimination?
+
+```{r analysis_5}
+# Prepare application data
+app_records <- app_records %>%
+  mutate(VDI_ID = as.integer(VDI_ID))
+
+# Join session and application data
+session_apps <- filtered_sessions %>%
+  inner_join(app_records, by = "VDI_ID")
+
+cat(sprintf("Combined dataset contains %s application launches\n", 
+            format(nrow(session_apps), big.mark=",")))
+
+# Aggregate application launches
+app_summary <- session_apps %>%
+  filter(!is.na(app_name), app_name != "") %>%
+  count(app_name, name = "launch_count") %>%
+  arrange(launch_count, app_name)
+
+cat(sprintf("Distinct applications identified: %s\n", nrow(app_summary)))
+cat(sprintf("Applications with single launch: %s\n", sum(app_summary$launch_count == 1)))
+
+# Extract least-used applications
+min_use_apps <- app_summary %>%
+  slice_head(n = 5)
+
+# Display results
+min_use_apps %>%
+  kable(
+    col.names = c("Application", "Launch Count"),
+    caption = "Five Least-Utilized Applications"
+  )
+```
+
+### Portfolio Rationalization Opportunity
+
+Analysis reveals extreme disparity in application utilization, with the five least-used applications each recording only a single launch throughout the year.
+
+**Portfolio Composition:**
+
+Examining the complete application landscape:
+
+```{r portfolio_breakdown}
+# Create usage tiers
+portfolio_tiers <- app_summary %>%
+  mutate(
+    tier = case_when(
+      launch_count == 1 ~ "Unused (1 launch)",
+      launch_count <= 5 ~ "Minimal (2-5 launches)",
+      launch_count <= 20 ~ "Low (6-20 launches)",
+      launch_count <= 100 ~ "Moderate (21-100)",
+      launch_count <= 500 ~ "High (101-500)",
+      TRUE ~ "Critical (500+)"
+    )
+  ) %>%
+  count(tier, name = "app_count") %>%
+  mutate(
+    tier = factor(tier, levels = c(
+      "Unused (1 launch)", "Minimal (2-5 launches)", "Low (6-20 launches)",
+      "Moderate (21-100)", "High (101-500)", "Critical (500+)"
+    ))
+  )
+
+portfolio_tiers %>%
+  kable(
+    col.names = c("Usage Tier", "Application Count"),
+    caption = "Application Portfolio Segmentation"
+  )
+```
+
+---
+
+# Supplementary Findings
+
+## High-Value Applications
+
+```{r supp_top_apps, fig.width=10, fig.height=6}
+# Identify most-utilized applications
+top_apps <- app_summary %>%
+  slice_max(launch_count, n = 10)
+
+# Visualize
+ggplot(top_apps, aes(x = reorder(app_name, launch_count), y = launch_count)) +
+  geom_col(fill = "#2ca02c", width = 0.7) +
+  geom_text(aes(label = comma(launch_count)), hjust = -0.1, size = 3) +
+  coord_flip() +
+  scale_y_continuous(labels = comma, expand = expansion(mult = c(0, 0.1))) +
+  labs(
+    title = "Most Frequently Utilized Applications",
+    subtitle = "Top 10 applications by launch count",
+    x = NULL,
+    y = "Total Launches"
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(plot.title = element_text(size = 13, face = "bold"))
+
+# Display table
+top_apps %>%
+  kable(
+    col.names = c("Application", "Launches"),
+    caption = "Top 10 Applications by Usage",
+    format.args = list(big.mark = ",")
+  )
+```
+
+
+## Temporal Usage Patterns
+
+```{r supp_monthly, fig.width=10, fig.height=5}
+# Calculate monthly metrics
+monthly_metrics <- valid_users %>%
+  mutate(month = floor_date(session_date, "month")) %>%
+  group_by(month) %>%
+  summarise(
+    users = n_distinct(userid),
+    sessions = n()
+  )
+
+# Visualize monthly patterns
+ggplot(monthly_metrics, aes(x = month)) +
+  geom_line(aes(y = users, color = "Distinct Users"), linewidth = 1.2) +
+  geom_line(aes(y = sessions/10, color = "Sessions (÷10)"), linewidth = 1.2) +
+  scale_color_manual(values = c("Distinct Users" = "#1f77b4", "Sessions (÷10)" = "#ff7f0e")) +
+  labs(
+    title = "Monthly Usage Dynamics",
+    subtitle = "User population and session volume throughout 2015",
+    x = NULL,
+    y = "Count",
+    color = NULL
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(
+    plot.title = element_text(size = 13, face = "bold"),
+    legend.position = "bottom"
+  )
+
+# Display monthly table
+monthly_metrics %>%
+  mutate(month = format(month, "%B %Y")) %>%
+  kable(
+    col.names = c("Month", "Unique Users", "Total Sessions"),
+    caption = "Monthly Activity Summary",
+    format.args = list(big.mark = ",")
+  )
+```
+
+
+
+## Weekly Usage Distribution
+
+```{r supp_weekday, fig.width=10, fig.height=5}
+# Analyze day-of-week patterns
+weekday_metrics <- valid_users %>%
+  mutate(dow = wday(session_date, label = TRUE, abbr = FALSE)) %>%
+  group_by(dow) %>%
+  summarise(
+    sessions = n(),
+    users = n_distinct(userid)
+  )
+
+# Visualize
+ggplot(weekday_metrics, aes(x = dow, y = users)) +
+  geom_col(fill = "#17becf", width = 0.7) +
+  geom_text(aes(label = users), vjust = -0.3, size = 3.5, fontface = "bold") +
+  labs(
+    title = "Weekly Usage Distribution",
+    subtitle = "Cumulative unique users by day of week",
+    x = NULL,
+    y = "Cumulative Users"
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(plot.title = element_text(size = 13, face = "bold"))
+
+# Display table
+weekday_metrics %>%
+  kable(
+    col.names = c("Day", "Sessions", "Users"),
+    caption = "Day-of-Week Usage Summary",
+    format.args = list(big.mark = ",")
+  )
+```
+
